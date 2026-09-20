@@ -11,6 +11,7 @@ def open_virtual_camera(width, height, fps=30):
             fmt=pyvirtualcam.PixelFormat.BGR,
         )
         print(f"Virtual camera: '{cam.device}' <- pick this camera in Zoom / Meet / Discord")
+        print("Tip: keep FaceCam running; leave OBS Virtual Camera stopped; select that name in the call app.")
         return cam
     except Exception as exc:
         print(f"Virtual camera unavailable ({exc}).")
@@ -22,7 +23,6 @@ def send_frame(cam, bgr_frame):
     if cam is None:
         return
     cam.send(bgr_frame)
-    cam.sleep_until_next_frame()
 
 
 def close_virtual_camera(cam):

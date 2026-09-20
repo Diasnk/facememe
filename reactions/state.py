@@ -2,52 +2,55 @@ import time
 
 from reactions.classifier import REACTIONS
 
-HOLD_FRAMES = 10
-ARM = {
-    "spin": 15,
-    "suspicious": 8,
-    "talking_to_wall": 6,
-    "dance": 6,
-    "crashing_out": 4,
-    "open_mouth": 4,
-    "tongue_out": 5,
-    "disgusted": 5,
-    "heart": 3,
-    "time_out": 3,
-    "cover_nose": 3,
-    "nose_closed": 3,
-    "flirty": 3,
-    "hand_up": 3,
+# Wall-clock arm/hold so latency does not stretch when FPS drops.
+# Values ≈ former frame counts at ~30 FPS, with a slightly tighter hold.
+HOLD_MS = 250
+ARM_MS = {
+    "spin": 400,
+    "suspicious": 250,
+    "talking_to_wall": 200,
+    "dance": 200,
+    "crashing_out": 130,
+    "open_mouth": 130,
+    "tongue_out": 160,
+    "disgusted": 160,
+    "heart": 100,
+    "time_out": 100,
+    "cover_nose": 100,
+    "nose_closed": 100,
+    "flirty": 100,
+    "hand_up": 100,
 }
 
 
 class ReactionState:
-    """Arm counters + hold frames so reaction labels do not flicker every frame."""
+    """Time-based arm + hold so reaction labels do not flicker."""
 
     def __init__(self):
-        self.arm = {name: 0 for name in REACTIONS}
+        self.arm_since = {name: None for name in REACTIONS}
         self.shown = None
-        self.hold = 0
+        self.hold_until = 0.0
         self.shown_since = time.monotonic()
 
     def update(self, raw_label):
+        now = time.monotonic()
         fired = None
         for name in REACTIONS:
             if raw_label == name:
-                self.arm[name] += 1
+                if self.arm_since[name] is None:
+                    self.arm_since[name] = now
+                needed = ARM_MS.get(name, 100) / 1000.0
+                if now - self.arm_since[name] >= needed:
+                    fired = name
             else:
-                self.arm[name] = 0
-            if raw_label == name and self.arm[name] >= ARM.get(name, 3):
-                fired = name
+                self.arm_since[name] = None
 
         if fired:
             if fired != self.shown:
                 self.shown = fired
-                self.hold = HOLD_FRAMES
-                self.shown_since = time.monotonic()
-        elif self.hold > 0:
-            self.hold -= 1
-        else:
+                self.shown_since = now
+            self.hold_until = now + HOLD_MS / 1000.0
+        elif now >= self.hold_until:
             self.shown = None
 
         return self.shown

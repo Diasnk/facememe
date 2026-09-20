@@ -180,10 +180,10 @@ def run_calibration(cap, face_landmarker, clock):
     return baseline
 
 
-def draw_feature_hud(frame, feats, energy, shown, raw):
+def draw_feature_hud(frame, feats, energy, shown, raw, fps=None):
     lines = [
         f"showing: {shown or '-'}   raw: {raw or '-'}",
-        f"motion: {energy:.2f}",
+        f"motion: {energy:.2f}" + (f"   fps: {fps:.1f}" if fps is not None else ""),
         f"z_jaw: {feats['z_jaw']:.2f}",
         f"z_sneer: {feats['z_sneer']:.2f}",
         f"turn: {feats['turn']:.2f}",
@@ -244,6 +244,11 @@ def main():
         if not args.no_vcam:
             vcam = open_virtual_camera(width, height, fps=30)
 
+        frame_i = 0
+        body = None
+        fps_ema = None
+        last_t = time.monotonic()
+
         while True:
             if frame is None:
                 frame = read_frame(cap, mirror=True)
@@ -269,10 +274,12 @@ def main():
                 for lms in hand_result.hand_landmarks
             ]
 
-            body = None
-            pose_result = detect_pose(pose_landmarker, mp_image, ts)
-            if pose_result.pose_landmarks:
-                body = Body.from_landmarks(pose_result.pose_landmarks[0], w, h)
+            # Pose every other frame — reuse last body (dance may lag 1 frame).
+            if frame_i % 2 == 0:
+                body = None
+                pose_result = detect_pose(pose_landmarker, mp_image, ts)
+                if pose_result.pose_landmarks:
+                    body = Body.from_landmarks(pose_result.pose_landmarks[0], w, h)
 
             energy = motion.update(hands, face)
             feats = measure(face, baseline) if face is not None else {}
@@ -293,20 +300,24 @@ def main():
             )
             send_frame(vcam, frame)
 
-            # Local preview gets debug overlays + HUD.
-            preview = frame.copy()
+            now = time.monotonic()
+            instant = 1.0 / max(now - last_t, 1e-6)
+            last_t = now
+            fps_ema = instant if fps_ema is None else (0.9 * fps_ema + 0.1 * instant)
+
+            # Local preview: draw debug + HUD on the same buffer after send.
             if face is not None:
-                draw_face(preview, face)
+                draw_face(frame, face)
             if hands:
-                draw_hands(preview, hands)
+                draw_hands(frame, hands)
             if body is not None:
-                draw_body(preview, body)
+                draw_body(frame, body)
             if feats:
-                draw_feature_hud(preview, feats, energy, shown, raw)
+                draw_feature_hud(frame, feats, energy, shown, raw, fps=fps_ema)
             else:
                 cv2.putText(
-                    preview,
-                    f"showing: {shown or '-'}   motion: {energy:.2f}",
+                    frame,
+                    f"showing: {shown or '-'}   motion: {energy:.2f}   fps: {fps_ema:.1f}",
                     (12, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.65,
@@ -314,7 +325,7 @@ def main():
                     2,
                 )
 
-            cv2.imshow("FaceCam", preview)
+            cv2.imshow("FaceCam", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
@@ -324,7 +335,9 @@ def main():
                     baseline = calibrated
                     reaction_state = ReactionState()
                     overlay_tracker.reset()
+                    body = None
 
+            frame_i += 1
             frame = None  # force a fresh read next iteration
     finally:
         face_landmarker.close()
