@@ -12,6 +12,7 @@ from calibration.baseline import (
     calibration_warnings,
 )
 from camera.capture import open_camera, read_frame, release_camera
+from camera.virtual_camera import close_virtual_camera, open_virtual_camera, send_frame
 from reactions.classifier import REACTIONS, decide, over
 from reactions.state import ReactionState
 from rendering.assets import load_all_assets
@@ -195,6 +196,16 @@ def draw_feature_hud(frame, feats, energy, shown, raw):
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="FaceCam virtual camera pipeline")
+    parser.add_argument(
+        "--no-vcam",
+        action="store_true",
+        help="preview only; do not open the virtual camera",
+    )
+    args = parser.parse_args()
+
     print("FACECAM starting...")
     print("Keys: q quit | c recalibrate")
 
@@ -213,6 +224,7 @@ def main():
         print("No calibration found — starting calibration first.")
 
     cap = None
+    vcam = None
     try:
         cap = open_camera(index=0, width=1280, height=720)
 
@@ -223,8 +235,18 @@ def main():
             else:
                 baseline = calibrated
 
+        # Probe one frame for actual size before opening the virtual camera.
+        frame = read_frame(cap, mirror=True)
+        if frame is None:
+            print("Failed to read an initial frame from the camera.")
+            return
+        height, width = frame.shape[:2]
+        if not args.no_vcam:
+            vcam = open_virtual_camera(width, height, fps=30)
+
         while True:
-            frame = read_frame(cap, mirror=True)
+            if frame is None:
+                frame = read_frame(cap, mirror=True)
             if frame is None:
                 print("Failed to read frame from camera.")
                 break
@@ -240,21 +262,17 @@ def main():
                     face_result.face_blendshapes[0] if face_result.face_blendshapes else None
                 )
                 face = Face.from_landmarks(face_result.face_landmarks[0], blendshapes, w, h)
-                draw_face(frame, face)
 
             hand_result = detect_hands(hand_landmarker, mp_image, ts)
             hands = [
                 Hand.from_landmarks(lms, w, h)
                 for lms in hand_result.hand_landmarks
             ]
-            if hands:
-                draw_hands(frame, hands)
 
             body = None
             pose_result = detect_pose(pose_landmarker, mp_image, ts)
             if pose_result.pose_landmarks:
                 body = Body.from_landmarks(pose_result.pose_landmarks[0], w, h)
-                draw_body(frame, body)
 
             energy = motion.update(hands, face)
             feats = measure(face, baseline) if face is not None else {}
@@ -265,6 +283,7 @@ def main():
             raw, _dbg = decide(face, hands, body, energy, feats, tongue=tongue)
             shown = reaction_state.update(raw)
 
+            # Clean output for the virtual camera: memes only, no debug drawings.
             overlay_tracker.draw(
                 frame,
                 face,
@@ -272,12 +291,21 @@ def main():
                 assets,
                 reaction_state.elapsed_ms(),
             )
+            send_frame(vcam, frame)
 
+            # Local preview gets debug overlays + HUD.
+            preview = frame.copy()
+            if face is not None:
+                draw_face(preview, face)
+            if hands:
+                draw_hands(preview, hands)
+            if body is not None:
+                draw_body(preview, body)
             if feats:
-                draw_feature_hud(frame, feats, energy, shown, raw)
+                draw_feature_hud(preview, feats, energy, shown, raw)
             else:
                 cv2.putText(
-                    frame,
+                    preview,
                     f"showing: {shown or '-'}   motion: {energy:.2f}",
                     (12, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -286,7 +314,7 @@ def main():
                     2,
                 )
 
-            cv2.imshow("FaceCam", frame)
+            cv2.imshow("FaceCam", preview)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
@@ -296,10 +324,13 @@ def main():
                     baseline = calibrated
                     reaction_state = ReactionState()
                     overlay_tracker.reset()
+
+            frame = None  # force a fresh read next iteration
     finally:
         face_landmarker.close()
         hand_landmarker.close()
         pose_landmarker.close()
+        close_virtual_camera(vcam)
         release_camera(cap)
         cv2.destroyAllWindows()
 
